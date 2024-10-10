@@ -51,6 +51,8 @@ func main() {
 	}
 
 	processedLogFiles := processLogs(allLogs, processFolder)
+	//fmt.Printf("Processing complete for files: %v\n", processedLogFiles) // Debug print
+
 	mergedFilePath := filepath.Join(processFolder, "MERGED.log")
 	mergeProcessedLogs(processedLogFiles, mergedFilePath)
 
@@ -64,8 +66,6 @@ func main() {
 	cleanupProcessFolder(processFolder, finalFormattedFilePath)
 	fmt.Printf("All processing complete. Final file saved at: %s\n", finalFormattedFilePath)
 }
-
-// Additional helper functions for the Go implementation
 
 func containsHelpFlag(args []string) bool {
 	for _, arg := range args {
@@ -138,7 +138,7 @@ func processLogs(logFiles []string, processFolder string) []string {
 			mu.Unlock()
 		}(logFile)
 	}
-	wg.Wait()
+	wg.Wait() // Wait for all goroutines to finish before returning
 	return processedLogFiles
 }
 
@@ -159,6 +159,11 @@ func getUniqueFileName(filePath string) string {
 
 func processLogFile(inputFilePath, outputFilePath string) {
 	dateTimePattern := determineDateTimePattern(inputFilePath)
+	if dateTimePattern == "" {
+		fmt.Printf("Skipping file %s due to unrecognized date pattern\n", inputFilePath)
+		return
+	}
+
 	file, err := os.Open(inputFilePath)
 	if err != nil {
 		fmt.Printf("Error opening file: %v\n", err)
@@ -173,26 +178,78 @@ func processLogFile(inputFilePath, outputFilePath string) {
 	}
 	defer outputFile.Close()
 
-	scanner := bufio.NewScanner(file)
+	reader := bufio.NewReader(file)
 	var realLogLine string
-	for scanner.Scan() {
-		line := scanner.Text()
+	lineNumber := 0
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err.Error() != "EOF" {
+				fmt.Printf("Error reading line %d: %v\n", lineNumber, err)
+			}
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		lineNumber++
+
+		// Debug output to monitor the processing of each line
+		//fmt.Printf("Processing line %d: %s\n", lineNumber, line)
+
 		if regexp.MustCompile(dateTimePattern).MatchString(line) {
 			if realLogLine != "" {
-				outputFile.WriteString(realLogLine + "\n")
+				_, writeErr := outputFile.WriteString(realLogLine + "\n")
+				if writeErr != nil {
+					fmt.Printf("Error writing to file: %v\n", writeErr)
+					return
+				}
+				//fmt.Printf("Writing processed line: %s\n", realLogLine) // Debugging output
 			}
 			realLogLine = line
 		} else if realLogLine != "" {
-			realLogLine += "GHEGHE" + line
+			realLogLine += "appTesting" + line
 		}
 	}
+
+	// Write the last accumulated line if any
 	if realLogLine != "" {
-		outputFile.WriteString(realLogLine + "\n")
+		_, writeErr := outputFile.WriteString(realLogLine + "\n")
+		if writeErr != nil {
+			fmt.Printf("Error writing final line to file: %v\n", writeErr)
+			return
+		}
+		//fmt.Printf("Writing final processed line: %s\n", realLogLine) // Debugging output
 	}
 }
 
 func determineDateTimePattern(filePath string) string {
-	return `^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})`
+	file, err := os.Open(filePath)
+	if err != nil {
+		fmt.Printf("Error opening file for date pattern detection: %v\n", err)
+		return ""
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Printf("Error reading line for date pattern detection: %v\n", err)
+		return ""
+	}
+	line = strings.TrimRight(line, "\r\n")
+
+	defaultPattern := `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}`
+	supportPattern := `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}`
+
+	if matched, _ := regexp.MatchString(defaultPattern, line); matched {
+		fmt.Println("Default date pattern detected.")
+		return defaultPattern
+	} else if matched, _ := regexp.MatchString(supportPattern, line); matched {
+		fmt.Println("Support date pattern detected.")
+		return supportPattern
+	}
+	fmt.Printf("No matching date pattern found for %s\n", filePath)
+	return ""
 }
 
 func mergeProcessedLogs(logFiles []string, outputFilePath string) {
@@ -211,9 +268,16 @@ func mergeProcessedLogs(logFiles []string, outputFilePath string) {
 		}
 		defer file.Close()
 
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			outputFile.WriteString(scanner.Text() + "\n")
+		reader := bufio.NewReader(file)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err.Error() != "EOF" {
+					fmt.Printf("Error reading line from %s: %v\n", logFile, err)
+				}
+				break
+			}
+			outputFile.WriteString(line)
 		}
 	}
 	fmt.Printf("Merged logs saved at: %s\n", outputFilePath)
@@ -228,10 +292,16 @@ func orderByDate(inputFilePath, outputFilePath, dateTimePattern string) {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		logEntries = append(logEntries, line)
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err.Error() != "EOF" {
+				fmt.Printf("Error reading line: %v\n", err)
+			}
+			break
+		}
+		logEntries = append(logEntries, strings.TrimRight(line, "\r\n"))
 	}
 
 	sort.Slice(logEntries, func(i, j int) bool {
@@ -267,12 +337,20 @@ func formatSupport(inputFilePath, outputFilePath, dateTimePattern string) {
 	}
 	defer outputFile.Close()
 
-	scanner := bufio.NewScanner(file)
+	reader := bufio.NewReader(file)
 	var logRow []string
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err.Error() != "EOF" {
+				fmt.Printf("Error reading line: %v\n", err)
+			}
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+
 		if regexp.MustCompile(dateTimePattern).MatchString(line) {
-			splitLines := strings.Split(line, "GHEGHE")
+			splitLines := strings.Split(line, "appTesting")
 			logRow = append(logRow, splitLines...)
 			for _, log := range logRow {
 				outputFile.WriteString(log + "\n")
