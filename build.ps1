@@ -1,5 +1,5 @@
 # Build for Linux
-$version = git tag
+$version = git describe --tags
 Write-Host "Building $version for Linux..."
 $env:GOOS = "linux"
 $env:GOARCH = "amd64"

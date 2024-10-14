@@ -1,5 +1,5 @@
 #!/bin/bash
-version=$(git tag)
+version=$(git describe --tags)
 # Build for Linux
 echo "Building $version for Linux..."
 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${version}" -o ./release/MergeOrderLog main.go
