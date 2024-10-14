@@ -51,7 +51,7 @@ func main() {
 	}
 
 	processedLogFiles := processLogs(allLogs, processFolder)
-	//fmt.Printf("Processing complete for files: %v\n", processedLogFiles) // Debug print
+	// fmt.Printf("Processing complete for files: %v\n", processedLogFiles) // Debug print
 
 	mergedFilePath := filepath.Join(processFolder, "MERGED.log")
 	mergeProcessedLogs(processedLogFiles, mergedFilePath)
@@ -194,7 +194,7 @@ func processLogFile(inputFilePath, outputFilePath string) {
 		lineNumber++
 
 		// Debug output to monitor the processing of each line
-		//fmt.Printf("Processing line %d: %s\n", lineNumber, line)
+		// fmt.Printf("Processing line %d: %s\n", lineNumber, line)
 
 		if regexp.MustCompile(dateTimePattern).MatchString(line) {
 			if realLogLine != "" {
@@ -203,7 +203,7 @@ func processLogFile(inputFilePath, outputFilePath string) {
 					fmt.Printf("Error writing to file: %v\n", writeErr)
 					return
 				}
-				//fmt.Printf("Writing processed line: %s\n", realLogLine) // Debugging output
+				// fmt.Printf("Writing processed line: %s\n", realLogLine) // Debugging output
 			}
 			realLogLine = line
 		} else if realLogLine != "" {
@@ -218,7 +218,7 @@ func processLogFile(inputFilePath, outputFilePath string) {
 			fmt.Printf("Error writing final line to file: %v\n", writeErr)
 			return
 		}
-		//fmt.Printf("Writing final processed line: %s\n", realLogLine) // Debugging output
+		// fmt.Printf("Writing final processed line: %s\n", realLogLine) // Debugging output
 	}
 }
 
