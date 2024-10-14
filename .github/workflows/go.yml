@@ -1,0 +1,35 @@
+name: Go Build and Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repository
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Set up Go
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+
+      # Build with versioning from tag
+      - name: Build
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "Building with version: $TAG_NAME"
+          go build -ldflags "-X main.version=$TAG_NAME" -o ./release/MergeOrderLog main.go
+          echo $TAG_NAME > Release.txt
+
+      # Upload release
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/MergeOrderLog
