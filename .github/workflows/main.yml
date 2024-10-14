@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'          # Trigger only on tags that start with "v"
+      
+permissions:
+  contents: write  # Allows write access to contents (necessary for creating releases)
 
 jobs:
   build:
