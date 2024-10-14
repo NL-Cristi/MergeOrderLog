@@ -22,7 +22,7 @@ jobs:
 
     - name: Get the Tag Version
       id: get_tag
-      run: echo "git describe --tags" >> $GITHUB_ENV
+      run: echo ${{ github.ref_name }} >> $GITHUB_ENV
 
     - name: Build the binary
       run: |
