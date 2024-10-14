@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+var version = "unknown"
+
 func main() {
 	// Parse command-line arguments
 	if len(os.Args) < 2 || containsHelpFlag(os.Args) {
@@ -77,7 +79,7 @@ func containsHelpFlag(args []string) bool {
 }
 
 func displayHelp() {
-	fmt.Println("LogProcessor - A CLI tool to merge and order log files. Ver. 1.0.1")
+	fmt.Println("LogProcessor - A CLI tool to merge and order log files. Version:", getVersion())
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  go run main.go --parentFolder \"C:\\path\\to\\log\\directory\"")
@@ -375,4 +377,8 @@ func cleanupProcessFolder(processFolder, finalFilePath string) {
 		}
 	}
 	fmt.Println("All temporary files deleted, only the final formatted log file remains.")
+}
+
+func getVersion() string {
+	return version
 }
