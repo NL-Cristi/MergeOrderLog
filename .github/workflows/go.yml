@@ -34,3 +34,4 @@ jobs:
         with:
           files: |
             release/MergeOrderLog
+        create_release: true
