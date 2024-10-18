@@ -244,10 +244,10 @@ func determineDateTimePattern(filePath string) string {
 	supportPattern := `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}`
 
 	if matched, _ := regexp.MatchString(defaultPattern, line); matched {
-		fmt.Println("Default date pattern detected.")
+		//fmt.Println("Default date pattern detected.")
 		return defaultPattern
 	} else if matched, _ := regexp.MatchString(supportPattern, line); matched {
-		fmt.Println("Support date pattern detected.")
+		//fmt.Println("Support date pattern detected.")
 		return supportPattern
 	}
 	fmt.Printf("No matching date pattern found for %s\n", filePath)
@@ -376,7 +376,7 @@ func cleanupProcessFolder(processFolder, finalFilePath string) {
 			os.Remove(filePath)
 		}
 	}
-	fmt.Println("All temporary files deleted, only the final formatted log file remains.")
+	//fmt.Println("All temporary files deleted, only the final formatted log file remains.")
 }
 
 func getVersion() string {
