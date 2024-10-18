@@ -66,7 +66,9 @@ func main() {
 	formatSupport(orderedFilePath, finalFormattedFilePath, dateTimePattern)
 
 	cleanupProcessFolder(processFolder, finalFormattedFilePath)
-	fmt.Printf("All processing complete. Final file saved at: %s\n", finalFormattedFilePath)
+	fmt.Println("All processing complete.")
+	fmt.Printf("Final file saved at: %s\n", finalFormattedFilePath)
+
 }
 
 func containsHelpFlag(args []string) bool {
