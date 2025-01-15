@@ -17,7 +17,7 @@ import (
 
 var (
 	// Version is set at build time via ldflags: -X main.version=<VERSION>
-	version                   = "unknown"
+	version                   = "Dev"
 	dateLayoutDefault         = "2006-01-02 15:04:05.000" // matches 2023-06-01 12:34:56.789
 	dateLayoutSupport         = "2006-01-02 15:04:05.000" // can parse both . and , with a small tweak
 	defaultPattern            = `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}`
