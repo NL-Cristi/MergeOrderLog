@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,72 +15,83 @@ import (
 	"time"
 )
 
-var version = "unknown"
+var (
+	// Version is set at build time via ldflags: -X main.version=<VERSION>
+	version                   = "unknown"
+	dateLayoutDefault         = "2006-01-02 15:04:05.000" // matches 2023-06-01 12:34:56.789
+	dateLayoutSupport         = "2006-01-02 15:04:05.000" // can parse both . and , with a small tweak
+	defaultPattern            = `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}`
+	supportPattern            = `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}`
+	lineContinuationDelimiter = "appTesting"
+	workerCount               = 5 // concurrency limit for processing logs
+)
+
+// LogLine holds a parsed timestamp and the raw text of the log line.
+type LogLine struct {
+	Timestamp time.Time
+	Raw       string
+}
 
 func main() {
-	// Parse command-line arguments
-	if len(os.Args) < 2 || containsHelpFlag(os.Args) {
+	var parentFolder string
+	flag.StringVar(&parentFolder, "parentFolder", "", "Path to the directory containing log files.")
+	flag.StringVar(&parentFolder, "p", "", "(Short) Path to the directory containing log files.")
+	showHelp := flag.Bool("h", false, "Display help.")
+	flag.Parse()
+
+	if *showHelp {
 		displayHelp()
 		return
 	}
-
-	parentFolder := ""
-	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "--parentFolder" || os.Args[i] == "-p" {
-			if i+1 < len(os.Args) {
-				parentFolder = os.Args[i+1]
-			} else {
-				fmt.Println("Error: No path specified for the parent folder.")
-				displayHelp()
-				return
-			}
-		}
-	}
-
 	if parentFolder == "" {
-		fmt.Println("Error: Parent folder path is required.")
-		displayHelp()
-		return
+		fmt.Println("Error: --parentFolder is required.")
+		flag.Usage()
+		os.Exit(1)
 	}
 
-	if _, err := os.Stat(parentFolder); os.IsNotExist(err) {
+	// Validate path
+	info, err := os.Stat(parentFolder)
+	if err != nil || !info.IsDir() {
 		fmt.Printf("Error: The provided path '%s' is not a valid directory.\n", parentFolder)
-		return
+		os.Exit(1)
 	}
 
+	// Create or verify ProcessedLogs folder
 	processFolder := createProcessedLogsFolder(parentFolder)
+
+	// Gather .log files
 	allLogs := getAllLogFiles(parentFolder)
 	if len(allLogs) == 0 {
-		fmt.Println("No .log files found in the specified directory and its subdirectories.")
+		fmt.Println("No .log files found in the specified directory or its subdirectories.")
 		return
 	}
 
+	// Process logs in parallel
 	processedLogFiles := processLogs(allLogs, processFolder)
-	// fmt.Printf("Processing complete for files: %v\n", processedLogFiles) // Debug print
 
+	// Merge processed logs
 	mergedFilePath := filepath.Join(processFolder, "MERGED.log")
 	mergeProcessedLogs(processedLogFiles, mergedFilePath)
 
-	orderedFilePath := filepath.Join(processFolder, "MERGED_ORDERED.log")
+	// Determine date pattern from merged log
 	dateTimePattern := determineDateTimePattern(mergedFilePath)
+	if dateTimePattern == "" {
+		fmt.Println("Warning: Could not detect date pattern. The ordering step may fail.")
+	}
+
+	// Order logs by date/time
+	orderedFilePath := filepath.Join(processFolder, "MERGED_ORDERED.log")
 	orderByDate(mergedFilePath, orderedFilePath, dateTimePattern)
 
+	// Format logs (split lines by the lineContinuationDelimiter)
 	finalFormattedFilePath := filepath.Join(processFolder, "FINAL_FORMATTED.log")
 	formatSupport(orderedFilePath, finalFormattedFilePath, dateTimePattern)
 
+	// Clean up
 	cleanupProcessFolder(processFolder, finalFormattedFilePath)
+
 	fmt.Println("All processing complete.")
 	fmt.Printf("Final file saved at: %s\n", finalFormattedFilePath)
-
-}
-
-func containsHelpFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "-h" || arg == "--help" {
-			return true
-		}
-	}
-	return false
 }
 
 func displayHelp() {
@@ -94,10 +108,9 @@ func displayHelp() {
 func createProcessedLogsFolder(parentFolder string) string {
 	processedLogsPath := filepath.Join(parentFolder, "ProcessedLogs")
 	if _, err := os.Stat(processedLogsPath); os.IsNotExist(err) {
-		err := os.Mkdir(processedLogsPath, os.ModePerm)
-		if err != nil {
-			fmt.Printf("An error occurred while creating the folder: %v\n", err)
-			panic(err)
+		if err := os.Mkdir(processedLogsPath, os.ModePerm); err != nil {
+			fmt.Printf("Error creating ProcessedLogs folder: %v\n", err)
+			os.Exit(1)
 		}
 		fmt.Println("ProcessedLogs folder created successfully.")
 	} else {
@@ -112,37 +125,66 @@ func getAllLogFiles(folderPath string) []string {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && (strings.HasSuffix(info.Name(), ".log") || regexp.MustCompile(`\.log(\.\d+)?$`).MatchString(info.Name())) {
-			logFiles = append(logFiles, path)
+		if !info.IsDir() {
+			match, _ := regexp.MatchString(`\.log(\.\d+)?$`, info.Name())
+			if match {
+				logFiles = append(logFiles, path)
+			}
 		}
 		return nil
 	})
 	if err != nil {
-		fmt.Printf("An error occurred while searching for log files: %v\n", err)
+		fmt.Printf("Error searching for log files: %v\n", err)
 	}
 	return logFiles
 }
 
 func processLogs(logFiles []string, processFolder string) []string {
+	jobs := make(chan string, len(logFiles))
+	results := make(chan string, len(logFiles))
+	errs := make(chan error, len(logFiles))
+
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var processedLogFiles []string
 
-	for _, logFile := range logFiles {
+	// Spawn workerCount workers
+	for w := 0; w < workerCount; w++ {
 		wg.Add(1)
-		go func(logFile string) {
+		go func() {
 			defer wg.Done()
-			baseFileName := filepath.Base(logFile)
-			processedLogFile := filepath.Join(processFolder, baseFileName)
-			processedLogFile = getUniqueFileName(processedLogFile)
+			for logFile := range jobs {
+				baseFileName := filepath.Base(logFile)
+				processedLogFile := filepath.Join(processFolder, baseFileName)
+				processedLogFile = getUniqueFileName(processedLogFile)
 
-			processLogFile(logFile, processedLogFile)
-			mu.Lock()
-			processedLogFiles = append(processedLogFiles, processedLogFile)
-			mu.Unlock()
-		}(logFile)
+				if err := processLogFile(logFile, processedLogFile); err != nil {
+					errs <- fmt.Errorf("%s was not processed: %v", logFile, err)
+				} else {
+					results <- processedLogFile
+				}
+			}
+		}()
 	}
-	wg.Wait() // Wait for all goroutines to finish before returning
+
+	// Enqueue jobs
+	for _, logFile := range logFiles {
+		jobs <- logFile
+	}
+	close(jobs)
+
+	// Wait for workers to finish
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	// Collect results
+	var processedLogFiles []string
+	for r := range results {
+		processedLogFiles = append(processedLogFiles, r)
+	}
+	for e := range errs {
+		fmt.Println(e)
+	}
+
 	return processedLogFiles
 }
 
@@ -154,231 +196,261 @@ func getUniqueFileName(filePath string) string {
 	count := 1
 	newFilePath := filePath
 
-	for _, err := os.Stat(newFilePath); !os.IsNotExist(err); _, err = os.Stat(newFilePath) {
+	for {
+		_, err := os.Stat(newFilePath)
+		if os.IsNotExist(err) {
+			break
+		}
 		newFilePath = filepath.Join(directory, fmt.Sprintf("%s%d%s", fileNameWithoutExtension, count, extension))
 		count++
 	}
 	return newFilePath
 }
 
-func processLogFile(inputFilePath, outputFilePath string) {
+func processLogFile(inputFilePath, outputFilePath string) error {
 	dateTimePattern := determineDateTimePattern(inputFilePath)
 	if dateTimePattern == "" {
-		fmt.Printf("Skipping file %s due to unrecognized date pattern\n", inputFilePath)
-		return
+		return fmt.Errorf("skipping file %s due to unrecognized date pattern", inputFilePath)
 	}
 
-	file, err := os.Open(inputFilePath)
+	compiledRegex, err := regexp.Compile(dateTimePattern)
 	if err != nil {
-		fmt.Printf("Error opening file: %v\n", err)
-		return
+		return fmt.Errorf("failed to compile regex pattern: %v", err)
 	}
-	defer file.Close()
 
-	outputFile, err := os.Create(outputFilePath)
+	inFile, err := os.Open(inputFilePath)
 	if err != nil {
-		fmt.Printf("Error creating file: %v\n", err)
-		return
+		return fmt.Errorf("error opening file %s: %v", inputFilePath, err)
 	}
-	defer outputFile.Close()
+	defer inFile.Close()
 
-	reader := bufio.NewReader(file)
-	var realLogLine string
+	outFile, err := os.Create(outputFilePath)
+	if err != nil {
+		return fmt.Errorf("error creating output file %s: %v", outputFilePath, err)
+	}
+	defer outFile.Close()
+
+	reader := bufio.NewReader(inFile)
+	var currentLogEntry string
 	lineNumber := 0
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			if err.Error() != "EOF" {
-				fmt.Printf("Error reading line %d: %v\n", lineNumber, err)
+			if errors.Is(err, io.EOF) {
+				break
 			}
-			break
+			return fmt.Errorf("error reading line %d: %v", lineNumber, err)
 		}
-		line = strings.TrimRight(line, "\r\n")
 		lineNumber++
+		line = strings.TrimRight(line, "\r\n")
 
-		// Debug output to monitor the processing of each line
-		// fmt.Printf("Processing line %d: %s\n", lineNumber, line)
-
-		if regexp.MustCompile(dateTimePattern).MatchString(line) {
-			if realLogLine != "" {
-				_, writeErr := outputFile.WriteString(realLogLine + "\n")
-				if writeErr != nil {
-					fmt.Printf("Error writing to file: %v\n", writeErr)
-					return
+		if compiledRegex.MatchString(line) {
+			if currentLogEntry != "" {
+				if _, err := outFile.WriteString(currentLogEntry + "\n"); err != nil {
+					return fmt.Errorf("error writing to file %s: %v", outputFilePath, err)
 				}
-				// fmt.Printf("Writing processed line: %s\n", realLogLine) // Debugging output
 			}
-			realLogLine = line
-		} else if realLogLine != "" {
-			realLogLine += "appTesting" + line
+			currentLogEntry = line
+		} else if currentLogEntry != "" {
+			currentLogEntry += lineContinuationDelimiter + line
 		}
 	}
 
-	// Write the last accumulated line if any
-	if realLogLine != "" {
-		_, writeErr := outputFile.WriteString(realLogLine + "\n")
-		if writeErr != nil {
-			fmt.Printf("Error writing final line to file: %v\n", writeErr)
-			return
+	// Write the last collected entry if any
+	if currentLogEntry != "" {
+		if _, err := outFile.WriteString(currentLogEntry + "\n"); err != nil {
+			return fmt.Errorf("error writing to file %s: %v", outputFilePath, err)
 		}
-		// fmt.Printf("Writing final processed line: %s\n", realLogLine) // Debugging output
 	}
+
+	return nil
 }
 
 func determineDateTimePattern(filePath string) string {
-	file, err := os.Open(filePath)
+	f, err := os.Open(filePath)
 	if err != nil {
 		fmt.Printf("Error opening file for date pattern detection: %v\n", err)
 		return ""
 	}
-	defer file.Close()
+	defer f.Close()
 
-	reader := bufio.NewReader(file)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		fmt.Printf("Error reading line for date pattern detection: %v\n", err)
-		return ""
+	scanner := bufio.NewScanner(f)
+	linesToCheck := 5
+	for i := 0; i < linesToCheck && scanner.Scan(); i++ {
+		line := scanner.Text()
+		if matched, _ := regexp.MatchString(defaultPattern, line); matched {
+			return defaultPattern
+		}
+		if matched, _ := regexp.MatchString(supportPattern, line); matched {
+			return supportPattern
+		}
 	}
-	line = strings.TrimRight(line, "\r\n")
-
-	defaultPattern := `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}`
-	supportPattern := `\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}`
-
-	if matched, _ := regexp.MatchString(defaultPattern, line); matched {
-		//fmt.Println("Default date pattern detected.")
-		return defaultPattern
-	} else if matched, _ := regexp.MatchString(supportPattern, line); matched {
-		//fmt.Println("Support date pattern detected.")
-		return supportPattern
-	}
-	fmt.Printf("No matching date pattern found for %s\n", filePath)
 	return ""
 }
 
 func mergeProcessedLogs(logFiles []string, outputFilePath string) {
-	outputFile, err := os.Create(outputFilePath)
+	outFile, err := os.Create(outputFilePath)
 	if err != nil {
-		fmt.Printf("Error creating file: %v\n", err)
+		fmt.Printf("Error creating merged file: %v\n", err)
 		return
 	}
-	defer outputFile.Close()
+	defer outFile.Close()
 
 	for _, logFile := range logFiles {
-		file, err := os.Open(logFile)
+		f, err := os.Open(logFile)
 		if err != nil {
-			fmt.Printf("Error opening file: %v\n", err)
+			fmt.Printf("Error opening file %s: %v\n", logFile, err)
 			continue
 		}
-		defer file.Close()
+		defer f.Close()
 
-		reader := bufio.NewReader(file)
+		reader := bufio.NewReader(f)
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
-				if err.Error() != "EOF" {
-					fmt.Printf("Error reading line from %s: %v\n", logFile, err)
+				if errors.Is(err, io.EOF) {
+					break
 				}
+				fmt.Printf("Error reading line from %s: %v\n", logFile, err)
 				break
 			}
-			outputFile.WriteString(line)
+			outFile.WriteString(line)
 		}
 	}
 	fmt.Printf("Merged logs saved at: %s\n", outputFilePath)
 }
 
 func orderByDate(inputFilePath, outputFilePath, dateTimePattern string) {
-	var logEntries []string
-	file, err := os.Open(inputFilePath)
+	content, err := os.ReadFile(inputFilePath)
 	if err != nil {
-		fmt.Printf("Error opening file: %v\n", err)
+		fmt.Printf("Error reading file: %v\n", err)
 		return
 	}
-	defer file.Close()
 
-	reader := bufio.NewReader(file)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err.Error() != "EOF" {
-				fmt.Printf("Error reading line: %v\n", err)
-			}
-			break
+	rawLines := strings.Split(strings.TrimRight(string(content), "\r\n"), "\n")
+	if dateTimePattern == "" {
+		// If no pattern found, just write them as-is
+		if err := os.WriteFile(outputFilePath, []byte(strings.Join(rawLines, "\n")), 0666); err != nil {
+			fmt.Printf("Error writing file: %v\n", err)
 		}
-		logEntries = append(logEntries, strings.TrimRight(line, "\r\n"))
+		return
 	}
 
-	sort.Slice(logEntries, func(i, j int) bool {
-		dateI, _ := time.Parse("2006-01-02 15:04:05.000", logEntries[i][:23])
-		dateJ, _ := time.Parse("2006-01-02 15:04:05.000", logEntries[j][:23])
-		return dateI.Before(dateJ)
+	var lines []LogLine
+	regex, _ := regexp.Compile(dateTimePattern)
+
+	for _, l := range rawLines {
+		timestamp, parseErr := parseTimestampFromLine(l, regex)
+		if parseErr != nil {
+			fmt.Printf("Warning: could not parse timestamp for line: %q - error: %v\n", l, parseErr)
+		}
+		lines = append(lines, LogLine{
+			Timestamp: timestamp, // zero time if parse fails
+			Raw:       l,
+		})
+	}
+
+	sort.Slice(lines, func(i, j int) bool {
+		return lines[i].Timestamp.Before(lines[j].Timestamp)
 	})
 
-	outputFile, err := os.Create(outputFilePath)
-	if err != nil {
-		fmt.Printf("Error creating file: %v\n", err)
-		return
+	sortedLines := make([]string, 0, len(lines))
+	for _, line := range lines {
+		sortedLines = append(sortedLines, line.Raw)
 	}
-	defer outputFile.Close()
 
-	for _, entry := range logEntries {
-		outputFile.WriteString(entry + "\n")
+	if err := os.WriteFile(outputFilePath, []byte(strings.Join(sortedLines, "\n")), 0666); err != nil {
+		fmt.Printf("Error writing file: %v\n", err)
+		return
 	}
 }
 
+func parseTimestampFromLine(line string, pattern *regexp.Regexp) (time.Time, error) {
+	match := pattern.FindString(line)
+	if match == "" {
+		return time.Time{}, fmt.Errorf("no timestamp found in line: %s", line)
+	}
+	normalized := strings.Replace(match, ",", ".", 1)
+	parsed, err := time.Parse(dateLayoutDefault, normalized)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parsed, nil
+}
+
 func formatSupport(inputFilePath, outputFilePath, dateTimePattern string) {
-	file, err := os.Open(inputFilePath)
+	inFile, err := os.Open(inputFilePath)
 	if err != nil {
 		fmt.Printf("Error opening file: %v\n", err)
 		return
 	}
-	defer file.Close()
+	defer inFile.Close()
 
-	outputFile, err := os.Create(outputFilePath)
+	outFile, err := os.Create(outputFilePath)
 	if err != nil {
 		fmt.Printf("Error creating file: %v\n", err)
 		return
 	}
-	defer outputFile.Close()
+	defer outFile.Close()
 
-	reader := bufio.NewReader(file)
-	var logRow []string
+	reader := bufio.NewReader(inFile)
+	regex, _ := regexp.Compile(dateTimePattern)
+	var logBuffer []string
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			if err.Error() != "EOF" {
-				fmt.Printf("Error reading line: %v\n", err)
+			if errors.Is(err, io.EOF) {
+				break
 			}
+			fmt.Printf("Error reading line: %v\n", err)
 			break
 		}
 		line = strings.TrimRight(line, "\r\n")
 
-		if regexp.MustCompile(dateTimePattern).MatchString(line) {
-			splitLines := strings.Split(line, "appTesting")
-			logRow = append(logRow, splitLines...)
-			for _, log := range logRow {
-				outputFile.WriteString(log + "\n")
+		if regex.MatchString(line) {
+			// Flush the buffer first
+			if len(logBuffer) > 0 {
+				for _, l := range logBuffer {
+					outFile.WriteString(l + "\n")
+				}
+				logBuffer = nil
 			}
-			logRow = []string{}
+			// Split the current line on continuation delimiter
+			segments := strings.Split(line, lineContinuationDelimiter)
+			for _, seg := range segments {
+				outFile.WriteString(seg + "\n")
+			}
 		} else {
-			logRow = append(logRow, line)
+			// Accumulate in buffer
+			logBuffer = append(logBuffer, line)
+		}
+	}
+
+	// Flush any remaining buffer
+	if len(logBuffer) > 0 {
+		for _, l := range logBuffer {
+			outFile.WriteString(l + "\n")
 		}
 	}
 }
 
 func cleanupProcessFolder(processFolder, finalFilePath string) {
-	files, err := os.ReadDir(processFolder)
+	entries, err := os.ReadDir(processFolder)
 	if err != nil {
 		fmt.Printf("Error reading directory: %v\n", err)
 		return
 	}
-	for _, file := range files {
-		filePath := filepath.Join(processFolder, file.Name())
-		if filePath != finalFilePath {
-			os.Remove(filePath)
+	for _, e := range entries {
+		fullPath := filepath.Join(processFolder, e.Name())
+		if fullPath == finalFilePath {
+			continue
+		}
+		if err := os.RemoveAll(fullPath); err != nil {
+			fmt.Printf("Error removing %s: %v\n", fullPath, err)
 		}
 	}
-	//fmt.Println("All temporary files deleted, only the final formatted log file remains.")
 }
 
 func getVersion() string {
